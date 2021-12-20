@@ -106,7 +106,7 @@ defmodule Tesla.Middleware.Logger do
     plug Tesla.Middleware.Logger, log_level: :debug
   end
   ```
-  
+
   NOTE:
   - **If you get `{:error, whatever}`, the log_level will be `:error`.**
   - You can get more log level information from [`Logger.Handler`](https://github.com/elixir-lang/elixir/blob/main/lib/logger/lib/logger/handler.ex)
@@ -182,7 +182,8 @@ defmodule Tesla.Middleware.Logger do
     format =
       if optional_runtime_format, do: Formatter.compile(optional_runtime_format), else: @format
 
-    level = log_level(response, config)
+    level = level(response, config)
+
     Logger.log(level, fn -> Formatter.format(env, response, time, format) end)
 
     if Keyword.get(config, :debug, true) do
@@ -192,9 +193,41 @@ defmodule Tesla.Middleware.Logger do
     response
   end
 
-  defp log_level({:error, _}, _), do: :error
+  @level_conflict "Can't provide both `level` and `log_level`. Recommend to keep `level` option."
 
-  defp log_level({:ok, env}, config) do
+  defp level(response, config) do
+    deprecated_level = Keyword.get(config, :log_level)
+    recommend_level = Keyword.get(config, :level)
+
+    case {recommend_level, deprecated_level} do
+      {nil, nil} -> default_log_level(response)
+      {_recommend, nil} -> log_level(response, config)
+      {nil, _deprecated} -> deprecated_level(response, config)
+      _ -> raise KeyError, @level_conflict
+    end
+  end
+
+  defp log_level(response, config) do
+    case Keyword.get(config, :level) do
+      nil ->
+        default_log_level(response)
+
+      fun when is_function(fun) ->
+        case fun.(response) do
+          :default -> default_log_level(response)
+          level -> level
+        end
+
+      atom when is_atom(atom) ->
+        atom
+    end
+  end
+
+  @deprecated "Option `log_level` is deprecated. Use `level` instead."
+  def deprecated_level(response, config), do: _deprecated_level(response, config)
+  defp _deprecated_level({:error, _}, _), do: :error
+
+  defp _deprecated_level({:ok, env}, config) do
     case Keyword.get(config, :log_level) do
       nil ->
         default_log_level(env)
@@ -211,11 +244,19 @@ defmodule Tesla.Middleware.Logger do
   end
 
   @spec default_log_level(Tesla.Env.t()) :: log_level
-  def default_log_level(env) do
+  def default_log_level(%Tesla.Env{status: status}) do
     cond do
-      env.status >= 400 -> :error
-      env.status >= 300 -> :warn
+      status >= 400 -> :error
+      status >= 300 -> :warn
       true -> :info
+    end
+  end
+
+  @spec default_log_level({:ok, Tesla.Env.t()} | {:error, any()}) :: log_level
+  def default_log_level(response) do
+    case response do
+      {:ok, %Tesla.Env{status: _} = env} -> default_log_level(env)
+      _ -> :error
     end
   end
 
